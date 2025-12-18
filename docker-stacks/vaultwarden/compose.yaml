@@ -1,0 +1,18 @@
+services:
+  server:
+    container_name: vaultwarden
+    volumes:
+      - ${DOCKER_DATA_PATH}/vaultwarden:/data/
+    restart: unless-stopped
+    ports:
+      - 9080:80
+    image: vaultwarden/server:latest
+    environment:
+      - EXPERIMENTAL_CLIENT_FEATURE_FLAGS=${EXPERIMENTAL_CLIENT_FEATURE_FLAGS}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/alive"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+networks: {}
