@@ -1,0 +1,274 @@
+networks:
+  media-net:
+    driver: bridge
+
+# ----------------------------
+# Reusable configuration blocks
+# ----------------------------
+x-common-env: &common-env
+  PUID: ${PUID}
+  PGID: ${PGID}
+  TZ: ${TZ}
+
+x-common-healthcheck: &common-healthcheck
+  interval: ${HEALTHCHECK_INTERVAL:-30s}
+  timeout: ${HEALTHCHECK_TIMEOUT:-20s}
+  retries: ${HEALTHCHECK_RETRIES:-5}
+  start_period: ${HEALTHCHECK_START_PERIOD:-60s}
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: ${LOG_MAX_SIZE:-10m}
+      max-file: ${LOG_MAX_FILES:-3}
+  security_opt:
+    - no-new-privileges:true
+
+x-service-defaults-privileged: &service-defaults-privileged
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: ${LOG_MAX_SIZE:-10m}
+      max-file: ${LOG_MAX_FILES:-3}
+
+services:
+  # ============================================
+  # VPN Gateway
+  # ============================================
+  gluetun:
+    image: qmcgaw/gluetun:${GLUETUN_VERSION:-latest}
+    container_name: gluetun
+    <<: *service-defaults-privileged
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - ${PORT_GLUETUN_WEBUI:-7080}:8080
+      - ${PORT_TORRENT_TCP:-6881}:6881
+      - ${PORT_TORRENT_TCP:-6881}:6881/udp
+      - ${PORT_PROWLARR:-9696}:9696
+    volumes:
+      - ${DOCKER_DATA_PATH}/gluetun:/gluetun
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER}
+      OPENVPN_USER: ${VPN_USERNAME}
+      OPENVPN_PASSWORD: ${VPN_PASSWORD}
+      SERVER_REGIONS: ${VPN_SERVER_REGION}
+      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING:-on}
+      VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
+      TZ: ${TZ}
+      UPDATER_PERIOD: ${UPDATER_PERIOD:-24h}
+      FIREWALL_INPUT_PORTS: ${FIREWALL_INPUT_PORTS}
+      FIREWALL_INPUT_SUBNETS: ${FIREWALL_INPUT_SUBNETS}
+      HEALTH_VPN_DURATION_INITIAL: ${VPN_HEALTH_INITIAL:-30s}
+      HEALTH_SUCCESS_WAIT_DURATION: ${VPN_HEALTH_WAIT:-10s}
+      HEALTH_CONTAINER_RESTART_NAMES: ${VPN_RESTART_CONTAINERS:-qbittorrent,prowlarr}
+      VPN_PORT_FORWARDING_UP_COMMAND: >
+        /bin/sh -c 'sleep 15 && wget -O- --retry-connrefused --post-data
+        "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"{{VPN_INTERFACE}}\",\"random_port\":false,\"upnp\":false}"
+        http://127.0.0.1:8080/api/v2/app/setPreferences'
+      VPN_PORT_FORWARDING_DOWN_COMMAND: >
+        /bin/sh -c 'wget -O- --retry-connrefused --post-data
+        "json={\"listen_port\":0,\"current_network_interface\":\"lo\"}"
+        http://127.0.0.1:8080/api/v2/app/setPreferences'
+    networks:
+      - media-net
+    healthcheck:
+      test: ["CMD", "nslookup", "google.com"]
+      interval: ${VPN_HEALTHCHECK_INTERVAL:-60s}
+      timeout: ${VPN_HEALTHCHECK_TIMEOUT:-10s}
+      retries: ${VPN_HEALTHCHECK_RETRIES:-3}
+
+  # ============================================
+  # Download Client
+  # ============================================
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:${QBITTORRENT_VERSION:-latest}
+    container_name: qbittorrent
+    <<: *service-defaults
+    network_mode: service:gluetun
+    environment:
+      <<: *common-env
+      WEBUI_PORT: ${QBT_WEBUI_PORT:-8080}
+      DOCKER_MODS: ${QBT_DOCKER_MODS:-ghcr.io/vuetorrent/vuetorrent-lsio-mod:latest}
+    volumes:
+      - ${DOCKER_DATA_PATH}/qbittorrent/config:/config
+      - ${STORAGE_PATH}/movies:/movies
+      - ${STORAGE_PATH}/shows:/shows
+      - ${STORAGE_PATH}/downloads:/downloads
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:${QBT_WEBUI_PORT:-8080}"]
+
+  # ============================================
+  # Cloudflare Bypass
+  # ============================================
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:${FLARESOLVERR_VERSION:-latest}
+    container_name: flaresolverr
+    <<: *service-defaults
+    ports:
+      - ${PORT_FLARESOLVERR:-8191}:8191
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
+      LOG_HTML: ${FLARESOLVERR_LOG_HTML:-false}
+      CAPTCHA_SOLVER: ${FLARESOLVERR_CAPTCHA_SOLVER:-none}
+      TZ: ${TZ}
+    networks:
+      - media-net
+
+  # ============================================
+  # Indexer Manager
+  # ============================================
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:${PROWLARR_VERSION:-latest}
+    container_name: prowlarr
+    <<: *service-defaults
+    network_mode: service:gluetun
+    environment:
+      <<: *common-env
+    volumes:
+      - ${DOCKER_DATA_PATH}/prowlarr/config:/config
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
+
+  # ============================================
+  # Movie Management
+  # ============================================
+  radarr:
+    image: lscr.io/linuxserver/radarr:${RADARR_VERSION:-latest}
+    container_name: radarr
+    <<: *service-defaults
+    ports:
+      - ${PORT_RADARR:-7878}:7878
+    environment:
+      <<: *common-env
+    volumes:
+      - ${DOCKER_DATA_PATH}/radarr/config:/config
+      - ${STORAGE_PATH}/movies:/movies
+      - ${STORAGE_PATH}/downloads:/downloads
+    depends_on:
+      prowlarr:
+        condition: service_started
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+    networks:
+      - media-net
+
+  # ============================================
+  # TV Show Management
+  # ============================================
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:${SONARR_VERSION:-latest}
+    container_name: sonarr
+    <<: *service-defaults
+    ports:
+      - ${PORT_SONARR:-8989}:8989
+    environment:
+      <<: *common-env
+    volumes:
+      - ${DOCKER_DATA_PATH}/sonarr/config:/config
+      - ${STORAGE_PATH}/shows:/shows
+      - ${STORAGE_PATH}/downloads:/downloads
+    depends_on:
+      prowlarr:
+        condition: service_started
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+    networks:
+      - media-net
+
+  # ============================================
+  # Subtitle Management
+  # ============================================
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:${BAZARR_VERSION:-latest}
+    container_name: bazarr
+    <<: *service-defaults
+    ports:
+      - ${PORT_BAZARR:-6767}:6767
+    environment:
+      <<: *common-env
+    volumes:
+      - ${DOCKER_DATA_PATH}/bazarr/config:/config
+      - ${STORAGE_PATH}/movies:/movies
+      - ${STORAGE_PATH}/shows:/shows
+    depends_on:
+      radarr:
+        condition: service_started
+      sonarr:
+        condition: service_started
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:6767/api/system/status"]
+    networks:
+      - media-net
+
+  # ============================================
+  # Request Management
+  # ============================================
+  jellyseerr:
+    image: fallenbagel/jellyseerr:${JELLYSEERR_VERSION:-latest}
+    container_name: jellyseerr
+    <<: *service-defaults
+    ports:
+      - ${PORT_JELLYSEERR:-5055}:5055
+    environment:
+      LOG_LEVEL: ${JELLYSEERR_LOG_LEVEL:-info}
+      TZ: ${TZ}
+    volumes:
+      - ${DOCKER_DATA_PATH}/jellyseerr/config:/app/config
+    depends_on:
+      radarr:
+        condition: service_started
+      sonarr:
+        condition: service_started
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5055/api/v1/status"]
+    networks:
+      - media-net
+
+  # ============================================
+  # Media Server
+  # ============================================
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:${JELLYFIN_VERSION:-latest}
+    container_name: jellyfin
+    <<: *service-defaults
+    ports:
+      - ${PORT_JELLYFIN_HTTP:-8096}:8096
+      - ${PORT_JELLYFIN_HTTPS:-8920}:8920
+      - ${PORT_JELLYFIN_DISCOVERY:-7359}:7359/udp
+      - ${PORT_JELLYFIN_DLNA:-1900}:1900/udp
+    group_add:
+      - "${JELLYFIN_RENDER_GROUP:-104}"
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      <<: *common-env
+      LIBVA_DRIVER_NAME: ${LIBVA_DRIVER_NAME:-iHD}
+    volumes:
+      - ${DOCKER_DATA_PATH}/jellyfin/config:/config
+      - ${STORAGE_PATH}/shows:/data/shows
+      - ${STORAGE_PATH}/movies:/data/movies
+      - ${STORAGE_PATH}/music:/data/music
+    healthcheck:
+      <<: *common-healthcheck
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+    networks:
+      - media-net
