@@ -1,0 +1,11 @@
+services:
+  termix:
+    image: ghcr.io/lukegus/termix:latest
+    container_name: termix
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /home/YOUR_USERNAME/docker_data/termix:/app/data
+    environment:
+      PORT: "8080"
