@@ -1,0 +1,12 @@
+services:
+    myst:
+        cap_add:
+            - NET_ADMIN
+        ports:
+            - 4449:4449
+        container_name: myst
+        volumes:
+            - /home/YOUR_USERNAME/docker_data/mysterium:/var/lib/mysterium-node
+        restart: unless-stopped
+        image: mysteriumnetwork/myst:latest
+        command: service --agreed-terms-and-conditions
